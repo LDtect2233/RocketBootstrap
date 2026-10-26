@@ -36,7 +36,25 @@ jobs:
           git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
           echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
-
+          
+      - name: Install libsubstrate stub
+        run: |
+          set -e
+          # The stub is part of the iPhoneOS SDK
+          SDK_LIB="$SYSROOT/usr/lib/libsubstrate.tbd"
+          if [ -f "$SDK_LIB" ]; then
+            cp "$SDK_LIB" "$THEOS/lib/libsubstrate.tbd"
+            echo "Copied libsubstrate.tbd from SDK to Theos"
+          else
+            echo "libsubstrate.tbd not found in SDK, downloading..."
+            curl -L https://raw.githubusercontent.com/theos/sdks/master/iPhoneOS14.5.sdk/usr/lib/libsubstrate.tbd \
+              -o "$THEOS/lib/libsubstrate.tbd"
+          fi
+          ls -la "$THEOS/lib/libsubstrate.tbd"
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
+          
       - name: Fetch iOS SDK
         run: |
           mkdir -p "$THEOS/sdks"
