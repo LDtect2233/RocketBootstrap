@@ -12,19 +12,51 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Rewrite git:// -> https:// BEFORE checkout so submodules don't hang.
-      # GitHub no longer serves git:// on port 9418; the LightMessaging submodule
-      # in RocketBootstrap still points at git://github.com/..., which times out.
-      - name: Configure Git to rewrite git:// to https://
+      # Rewrite git:// -> https:// globally as a safety net (covers any git
+      # invocation that bypasses our manual submodule handling below).
+      - name: Configure Git URL rewrites
         run: |
           git config --global url."https://github.com/".insteadOf "git://github.com/"
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
 
-      - name: Checkout project
+      # Check out WITHOUT submodules. actions/checkout runs its own
+      # `git submodule sync` internally, which overwrites any rewrite we set
+      # and restores the git:// URL from .gitmodules — that's why the previous
+      # attempt still timed out. Skipping submodules here sidesteps the issue.
+      - name: Checkout project (no submodules)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 1
+
+      # Physically rewrite .gitmodules to HTTPS, sync, and pull submodules.
+      # git config -f edits .gitmodules on disk (not a transient rewrite),
+      # so `git submodule sync` propagates the HTTPS URL correctly.
+      - name: Fix and initialize submodules over HTTPS
+        run: |
+          set -e
+          if [ -f .gitmodules ]; then
+            echo "== Before =="
+            cat .gitmodules
+            git config -f .gitmodules submodule.LightMessaging.url https://github.com/rpetrich/LightMessaging.git
+            # Also catch any other submodule that might use git:// (future-proof)
+            git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key _; do
+              cur=$(git config -f .gitmodules --get "$key")
+              case "$cur" in
+                git://github.com/*)
+                  fixed="https://github.com/${cur#git://github.com/}"
+                  git config -f .gitmodules "$key" "$fixed"
+                  echo "Rewrote $key: $cur -> $fixed"
+                  ;;
+              esac
+            done
+            echo "== After =="
+            cat .gitmodules
+            git submodule sync --recursive
+            git submodule update --init --recursive --depth=1
+          else
+            echo "No .gitmodules found — nothing to do."
+          fi
 
       - name: Install System Dependencies
         run: |
@@ -55,11 +87,10 @@ jobs:
           echo "== submodule status =="
           git submodule status --recursive
           echo "== LightMessaging contents =="
-          ls -la LightMessaging | head -20
+          ls -la LightMessaging 2>/dev/null | head -20 || echo "(LightMessaging missing)"
 
       - name: Compile Rootless Package
         run: |
-          # Build directly from the checked-out fork — no extra clone needed
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
         env:
           THEOS: ${{ github.workspace }}/theos
