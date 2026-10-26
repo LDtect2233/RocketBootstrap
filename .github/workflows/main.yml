@@ -30,22 +30,24 @@ jobs:
             git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key _; do
               cur=$(git config -f .gitmodules --get "$key")
               case "$cur" in
-                git://github.com/*) fixed="https://github.com/${cur#git://github.com/}" ;;
-                git@github.com:*)   fixed="https://github.com/${cur#git@github.com:}" ;;
-                *) continue ;;
+                git://github.com/*)
+                  fixed="https://github.com/${cur#git://github.com/}"
+                  git config -f .gitmodules "$key" "$fixed"
+                  ;;
+                git@github.com:*)
+                  fixed="https://github.com/${cur#git@github.com:}"
+                  git config -f .gitmodules "$key" "$fixed"
+                  ;;
               esac
-              git config -f .gitmodules "$key" "$fixed"
             done
             git submodule sync --recursive
             git submodule update --init --recursive --depth=1
           fi
 
-      # NEW: ldid is not bundled with Theos — install it via Homebrew.
       - name: Install ldid
         run: |
           brew install ldid
-          echo "== Verify ldid =="
-          ldid -v || ldid --version || true
+          ldid -v || true
 
       - name: Install Theos
         run: |
@@ -65,9 +67,13 @@ jobs:
           set -e
           ln -sfn "$THEOS" "$GITHUB_WORKSPACE/framework"
           find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
-            grep -qE 'framework/(makefiles|extras)' "$mf" && \
-              sed -i '' -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
-                        -e 's#framework/extras#$(THEOS)/extras#g' "$mf"
+            if grep -qE 'framework/(makefiles|extras)' "$mf"; then
+              echo "Patching $mf"
+              sed -i '' \
+                -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
+                -e 's#framework/extras#$(THEOS)/extras#g' \
+                "$mf"
+            fi
           done
 
       - name: Fix header include case
@@ -75,16 +81,20 @@ jobs:
           set -e
           find . -type f \( -name '*.h' -o -name '*.m' -o -name '*.mm' -o -name '*.x' -o -name '*.xm' \) \
             -not -path './.git/*' | while read -r f; do
-            grep -q 'rocketbootstrap/rocketbootstrap\.h' "$f" 2>/dev/null && \
+            if grep -q 'rocketbootstrap/rocketbootstrap\.h' "$f" 2>/dev/null; then
+              echo "Patching $f"
               sed -i '' -e 's#\.\./rocketbootstrap/rocketbootstrap\.h#../RocketBootstrap/rocketbootstrap.h#g' "$f"
+            fi
           done
 
       - name: Force ARCHS=arm64 in all Makefiles
         run: |
           set -e
           find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
-            grep -qE '^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+]?=' "$mf" && \
+            if grep -qE '^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+]?=' "$mf"; then
+              echo "Patching ARCHS in $mf"
               sed -i '' -E 's/^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+]?=.*/override ARCHS := arm64/' "$mf"
+            fi
           done
 
       - name: Compile Rootless Package (arm64 only)
@@ -103,8 +113,11 @@ jobs:
         run: |
           DEB=$(ls packages/*.deb | head -1)
           dpkg-deb -c "$DEB" | head -40
-          dpkg-deb -c "$DEB" | grep -q '/var/jb/' || { echo "❌ not rootless"; exit 1; }
-          echo "✅ rootless paths confirmed"
+          if ! dpkg-deb -c "$DEB" | grep -q '/var/jb/'; then
+            echo "❌ Package does not contain /var/jb/ paths"
+            exit 1
+          fi
+          echo "✅ Rootless paths confirmed"
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
