@@ -1,4 +1,4 @@
-name: Build RocketBootstrap Rootless (arm64)
+name: Build RocketBootstrap Rootless
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - name: Configure Git URL rewrites
@@ -46,48 +46,19 @@ jobs:
             git submodule update --init --recursive --depth=1
           fi
 
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          # Install all dependencies except libtinfo5
-          sudo apt-get install -y \
-            build-essential pkg-config git coreutils lzma \
-            liblzma-dev libssl-dev libyaml-dev libxml2-dev \
-            curl xz-utils fakeroot
-          
-          # Manually download and install the libtinfo5 deb package for Ubuntu 22.04
-          wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
-          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
-          rm -f libtinfo5_6.3-2ubuntu0.1_amd64.deb
-          
-      - name: Set up Theos Environment
+      - name: Install Theos
         run: |
           git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
           echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
 
-      # Key: Install the Linux iOS toolchain (Bingner version supports arm64e and is fully compatible with arm64)
-      - name: Install Linux iOS Toolchain
-        run: |
-          set -e
-          mkdir -p "$THEOS/toolchain/linux/iphone"
-          curl -L https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma \
-            -o /tmp/toolchain.tar.lzma
-          tar -xJf /tmp/toolchain.tar.lzma -C /tmp
-          mv /tmp/ios-arm64e-clang-toolchain/* "$THEOS/toolchain/linux/iphone/"
-          rm -rf /tmp/ios-arm64e-clang-toolchain /tmp/toolchain.tar.lzma
-          echo "== Toolchain bin =="
-          ls -la "$THEOS/toolchain/linux/iphone/bin/" | head -20
-        env:
-          THEOS: ${{ github.workspace }}/theos
-
       - name: Fetch iOS SDK
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/theos/sdks"
+          mkdir -p "$THEOS/sdks"
           curl -L https://github.com/theos/sdks/archive/refs/heads/master.tar.gz \
             | tar -xz -C /tmp
-          cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$GITHUB_WORKSPACE/theos/sdks/"
-          echo "SYSROOT=$GITHUB_WORKSPACE/theos/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
+          cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$THEOS/sdks/"
+          echo "SYSROOT=$THEOS/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
       - name: Fix legacy Theos path references
         run: |
@@ -95,23 +66,20 @@ jobs:
           ln -sfn "$THEOS" "$GITHUB_WORKSPACE/framework"
           find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
             if grep -qE 'framework/(makefiles|extras)' "$mf"; then
-              sed -i \
+              sed -i '' \
                 -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
                 -e 's#framework/extras#$(THEOS)/extras#g' \
                 "$mf"
             fi
           done
-        env:
-          THEOS: ${{ github.workspace }}/theos
 
-      - name: Compile Rootless Package (arm64 only)
+      - name: Compile Rootless Package
         run: |
-          # Explicitly restrict to arm64, avoiding arm64e ABI issues
-          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
+          # On macOS, FINALPACKAGE=1 works normally — plutil is available.
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
-          ARCHS: arm64
 
       - name: Verify architecture and rootless paths
         run: |
@@ -123,13 +91,12 @@ jobs:
             exit 1
           fi
           echo "✅ Rootless paths confirmed"
-          # Extract and verify architecture
           mkdir -p /tmp/debcheck && dpkg-deb -x "$DEB" /tmp/debcheck
           find /tmp/debcheck -name '*.dylib' -exec file {} \; | grep -i 'arm64' || true
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rocketbootstrap-rootless-deb-arm64
+          name: rocketbootstrap-rootless-deb
           path: packages/*.deb
           if-no-files-found: error
