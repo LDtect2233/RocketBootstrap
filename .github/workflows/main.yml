@@ -1,0 +1,52 @@
+name: Build RocketBootstrap Rootless
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config git coreutils lzma liblzma-dev libssl-dev libyaml-dev libxml2-dev
+
+      - name: Set up Theos Environment
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch iOS SDK
+        run: |
+          git clone --depth 1 https://github.com/theos/sdks.git "$GITHUB_WORKSPACE/theos/sdks"
+          echo "SYSROOT=$GITHUB_WORKSPACE/theos/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
+
+      - name: Clone RocketBootstrap Source
+        run: |
+          git clone --recursive https://github.com/rpetrich/RocketBootstrap.git rocketbootstrap-src
+
+      - name: Compile Rootless Package
+        run: |
+          cd rocketbootstrap-src
+          # THEOS_PACKAGE_SCHEME=rootless instructs the linker to use @rpath and prefixes paths to /var/jb
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
+
+      - name: Upload Rootless .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocketbootstrap-rootless-deb
+          path: rocketbootstrap-src/packages/*.deb
+          if-no-files-found: error
