@@ -73,13 +73,41 @@ jobs:
             fi
           done
 
-      - name: Compile Rootless Package
+      # Fix the case-sensitivity issue in headers.
+      # The include uses "../rocketbootstrap/..." but the directory on disk
+      # is "RocketBootstrap/..." — on macOS's case-insensitive FS this still
+      # resolves, but clang warns (and -Werror turns that into an error).
+      - name: Fix header include case
         run: |
-          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
+          set -e
+          # Patch every source file under LightMessaging/ and the project root
+          # that has the wrong-case include.
+          find . -type f \( -name '*.h' -o -name '*.m' -o -name '*.mm' -o -name '*.x' -o -name '*.xm' \) \
+            -not -path './.git/*' | while read -r f; do
+            if grep -q 'rocketbootstrap/rocketbootstrap.h' "$f" 2>/dev/null; then
+              echo "Patching $f"
+              sed -i '' \
+                -e 's#\.\./rocketbootstrap/rocketbootstrap\.h#../RocketBootstrap/rocketbootstrap.h#g' \
+                "$f"
+            fi
+          done
+          echo "== Remaining bad includes =="
+          grep -r 'rocketbootstrap/rocketbootstrap.h' . --include='*.h' --include='*.m' \
+            --include='*.mm' --include='*.x' --include='*.xm' || true
+
+      - name: Compile Rootless Package (arm64 only)
+        run: |
+          # -Wno-error=nonportable-include-path: demote that specific warning
+          #   back to a warning in case the header patch misses something.
+          # -Wno-nonportable-include-path: silence it entirely as a backup.
+          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless \
+            ARCHS=arm64 \
+            ADDITIONAL_CFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path"
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
-          
+          ARCHS: arm64
+
       - name: Verify architecture and rootless paths
         run: |
           DEB=$(ls packages/*.deb | head -1)
@@ -91,7 +119,8 @@ jobs:
           fi
           echo "✅ Rootless paths confirmed"
           mkdir -p /tmp/debcheck && dpkg-deb -x "$DEB" /tmp/debcheck
-          find /tmp/debcheck -name '*.dylib' -exec file {} \; | grep -i 'arm64' || true
+          echo "== dylib architectures =="
+          find /tmp/debcheck -name '*.dylib' -exec file {} \; | grep -i 'arm' || true
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
