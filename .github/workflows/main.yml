@@ -30,21 +30,22 @@ jobs:
             git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key _; do
               cur=$(git config -f .gitmodules --get "$key")
               case "$cur" in
-                git://github.com/*)
-                  fixed="https://github.com/${cur#git://github.com/}"
-                  git config -f .gitmodules "$key" "$fixed"
-                  echo "Rewrote $key: $cur -> $fixed"
-                  ;;
-                git@github.com:*)
-                  fixed="https://github.com/${cur#git@github.com:}"
-                  git config -f .gitmodules "$key" "$fixed"
-                  echo "Rewrote $key: $cur -> $fixed"
-                  ;;
+                git://github.com/*) fixed="https://github.com/${cur#git://github.com/}" ;;
+                git@github.com:*)   fixed="https://github.com/${cur#git@github.com:}" ;;
+                *) continue ;;
               esac
+              git config -f .gitmodules "$key" "$fixed"
             done
             git submodule sync --recursive
             git submodule update --init --recursive --depth=1
           fi
+
+      # NEW: ldid is not bundled with Theos — install it via Homebrew.
+      - name: Install ldid
+        run: |
+          brew install ldid
+          echo "== Verify ldid =="
+          ldid -v || ldid --version || true
 
       - name: Install Theos
         run: |
@@ -55,8 +56,7 @@ jobs:
       - name: Fetch iOS SDK
         run: |
           mkdir -p "$THEOS/sdks"
-          curl -L https://github.com/theos/sdks/archive/refs/heads/master.tar.gz \
-            | tar -xz -C /tmp
+          curl -L https://github.com/theos/sdks/archive/refs/heads/master.tar.gz | tar -xz -C /tmp
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$THEOS/sdks/"
           echo "SYSROOT=$THEOS/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
@@ -65,44 +65,35 @@ jobs:
           set -e
           ln -sfn "$THEOS" "$GITHUB_WORKSPACE/framework"
           find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
-            if grep -qE 'framework/(makefiles|extras)' "$mf"; then
-              sed -i '' \
-                -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
-                -e 's#framework/extras#$(THEOS)/extras#g' \
-                "$mf"
-            fi
+            grep -qE 'framework/(makefiles|extras)' "$mf" && \
+              sed -i '' -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
+                        -e 's#framework/extras#$(THEOS)/extras#g' "$mf"
           done
 
-      # Fix the case-sensitivity issue in headers.
-      # The include uses "../rocketbootstrap/..." but the directory on disk
-      # is "RocketBootstrap/..." — on macOS's case-insensitive FS this still
-      # resolves, but clang warns (and -Werror turns that into an error).
       - name: Fix header include case
         run: |
           set -e
-          # Patch every source file under LightMessaging/ and the project root
-          # that has the wrong-case include.
           find . -type f \( -name '*.h' -o -name '*.m' -o -name '*.mm' -o -name '*.x' -o -name '*.xm' \) \
             -not -path './.git/*' | while read -r f; do
-            if grep -q 'rocketbootstrap/rocketbootstrap.h' "$f" 2>/dev/null; then
-              echo "Patching $f"
-              sed -i '' \
-                -e 's#\.\./rocketbootstrap/rocketbootstrap\.h#../RocketBootstrap/rocketbootstrap.h#g' \
-                "$f"
-            fi
+            grep -q 'rocketbootstrap/rocketbootstrap\.h' "$f" 2>/dev/null && \
+              sed -i '' -e 's#\.\./rocketbootstrap/rocketbootstrap\.h#../RocketBootstrap/rocketbootstrap.h#g' "$f"
           done
-          echo "== Remaining bad includes =="
-          grep -r 'rocketbootstrap/rocketbootstrap.h' . --include='*.h' --include='*.m' \
-            --include='*.mm' --include='*.x' --include='*.xm' || true
+
+      - name: Force ARCHS=arm64 in all Makefiles
+        run: |
+          set -e
+          find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
+            grep -qE '^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+]?=' "$mf" && \
+              sed -i '' -E 's/^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+]?=.*/override ARCHS := arm64/' "$mf"
+          done
 
       - name: Compile Rootless Package (arm64 only)
         run: |
-          # -Wno-error=nonportable-include-path: demote that specific warning
-          #   back to a warning in case the header patch misses something.
-          # -Wno-nonportable-include-path: silence it entirely as a backup.
           make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless \
             ARCHS=arm64 \
-            ADDITIONAL_CFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path"
+            TARGET_CODESIGN=ldid \
+            ADDITIONAL_CFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path" \
+            ADDITIONAL_OBJCFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path"
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
@@ -111,16 +102,9 @@ jobs:
       - name: Verify architecture and rootless paths
         run: |
           DEB=$(ls packages/*.deb | head -1)
-          echo "Inspecting $DEB"
           dpkg-deb -c "$DEB" | head -40
-          if ! dpkg-deb -c "$DEB" | grep -q '/var/jb/'; then
-            echo "❌ Package does not contain /var/jb/ paths"
-            exit 1
-          fi
-          echo "✅ Rootless paths confirmed"
-          mkdir -p /tmp/debcheck && dpkg-deb -x "$DEB" /tmp/debcheck
-          echo "== dylib architectures =="
-          find /tmp/debcheck -name '*.dylib' -exec file {} \; | grep -i 'arm' || true
+          dpkg-deb -c "$DEB" | grep -q '/var/jb/' || { echo "❌ not rootless"; exit 1; }
+          echo "✅ rootless paths confirmed"
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
