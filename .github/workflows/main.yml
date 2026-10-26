@@ -17,7 +17,6 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git://github.com/"
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
 
-      # Clone the rootless-ready fork instead of the original rpetrich repo.
       - name: Checkout RocketBootstrap (Lessica fork)
         uses: actions/checkout@v4
         with:
@@ -36,31 +35,36 @@ jobs:
           git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
           echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
-          
-      - name: Install libsubstrate stub
-        run: |
-          set -e
-          # The stub is part of the iPhoneOS SDK
-          SDK_LIB="$SYSROOT/usr/lib/libsubstrate.tbd"
-          if [ -f "$SDK_LIB" ]; then
-            cp "$SDK_LIB" "$THEOS/lib/libsubstrate.tbd"
-            echo "Copied libsubstrate.tbd from SDK to Theos"
-          else
-            echo "libsubstrate.tbd not found in SDK, downloading..."
-            curl -L https://raw.githubusercontent.com/theos/sdks/master/iPhoneOS14.5.sdk/usr/lib/libsubstrate.tbd \
-              -o "$THEOS/lib/libsubstrate.tbd"
-          fi
-          ls -la "$THEOS/lib/libsubstrate.tbd"
-        env:
-          THEOS: ${{ github.workspace }}/theos
-          SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
-          
+
       - name: Fetch iOS SDK
         run: |
           mkdir -p "$THEOS/sdks"
           curl -L https://github.com/theos/sdks/archive/refs/heads/master.tar.gz | tar -xz -C /tmp
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$THEOS/sdks/"
           echo "SYSROOT=$THEOS/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
+
+      # Generate proper .tbd stubs for libsubstrate and TweakInject so the linker is satisfied
+      - name: Create substrate and TweakInject stubs
+        run: |
+          set -e
+          mkdir -p libs/rootless
+          cat > /tmp/libsubstrate.tbd <<'EOF'
+          --- !tapi-tbd
+          tbd-version:     4
+          targets:         [ arm64-ios, arm64e-ios ]
+          install-name:    '/usr/lib/libsubstrate.dylib'
+          current-version: 1
+          compatibility-version: 1
+          exports:
+            - targets:         [ arm64-ios, arm64e-ios ]
+              symbols:         [ MSHookFunction, MSHookMessageEx, MSHookMemory, MSGetImageByName, MSFindSymbol ]
+          ...
+          EOF
+
+          cp /tmp/libsubstrate.tbd "$THEOS/lib/libsubstrate.tbd"
+          cp /tmp/libsubstrate.tbd libs/rootless/TweakInject.tbd
+          echo "Stubs created:"
+          ls -la "$THEOS/lib/libsubstrate.tbd" libs/rootless/TweakInject.tbd
 
       - name: Fix legacy Theos path references
         run: |
@@ -87,7 +91,6 @@ jobs:
             fi
           done
 
-      # Add the missing Provides field so tweaks depending on 'rocketbootstrap' are satisfied.
       - name: Add Provides field to control file
         run: |
           set -e
