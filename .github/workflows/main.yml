@@ -43,28 +43,22 @@ jobs:
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$THEOS/sdks/"
           echo "SYSROOT=$THEOS/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
-      # Generate proper .tbd stubs for libsubstrate and TweakInject so the linker is satisfied
-      - name: Create substrate and TweakInject stubs
+      - name: Provide Rootless Stubs
         run: |
           set -e
+          # Theos ships with a rootless stub for CydiaSubstrate. We reuse it
+          # for both the missing TweakInject and libsubstrate links.
+          SOURCE_STUB="$THEOS/vendor/lib/iphone/rootless/CydiaSubstrate.framework/CydiaSubstrate.tbd"
+          
           mkdir -p libs/rootless
-          cat > /tmp/libsubstrate.tbd <<'EOF'
-          --- !tapi-tbd
-          tbd-version:     4
-          targets:         [ arm64-ios, arm64e-ios ]
-          install-name:    '/usr/lib/libsubstrate.dylib'
-          current-version: 1
-          compatibility-version: 1
-          exports:
-            - targets:         [ arm64-ios, arm64e-ios ]
-              symbols:         [ MSHookFunction, MSHookMessageEx, MSHookMemory, MSGetImageByName, MSFindSymbol ]
-          ...
-          EOF
-
-          cp /tmp/libsubstrate.tbd "$THEOS/lib/libsubstrate.tbd"
-          cp /tmp/libsubstrate.tbd libs/rootless/TweakInject.tbd
-          echo "Stubs created:"
-          ls -la "$THEOS/lib/libsubstrate.tbd" libs/rootless/TweakInject.tbd
+          if [ -f "$SOURCE_STUB" ]; then
+            cp "$SOURCE_STUB" libs/rootless/TweakInject.tbd
+            cp "$SOURCE_STUB" "$THEOS/lib/libsubstrate.tbd"
+            echo "✅ Copied CydiaSubstrate.tbd to libs/rootless/TweakInject.tbd and $THEOS/lib/libsubstrate.tbd"
+          else
+            echo "❌ Stub not found at $SOURCE_STUB"
+            exit 1
+          fi
 
       - name: Fix legacy Theos path references
         run: |
