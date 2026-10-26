@@ -12,27 +12,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Rewrite git:// -> https:// globally as a safety net
       - name: Configure Git URL rewrites
         run: |
           git config --global url."https://github.com/".insteadOf "git://github.com/"
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
 
-      # Checkout WITHOUT submodules — actions/checkout's internal `git submodule sync`
-      # overwrites any URL rewrite and restores git:// from .gitmodules.
       - name: Checkout project (no submodules)
         uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 1
 
-      # Physically rewrite .gitmodules to HTTPS, sync, then pull submodules.
       - name: Fix and initialize submodules over HTTPS
         run: |
           set -e
           if [ -f .gitmodules ]; then
-            echo "== Before =="
-            cat .gitmodules
             git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key _; do
               cur=$(git config -f .gitmodules --get "$key")
               case "$cur" in
@@ -48,8 +42,6 @@ jobs:
                   ;;
               esac
             done
-            echo "== After =="
-            cat .gitmodules
             git submodule sync --recursive
             git submodule update --init --recursive --depth=1
           else
@@ -62,79 +54,7 @@ jobs:
           sudo apt-get install -y \
             build-essential pkg-config git coreutils lzma \
             liblzma-dev libssl-dev libyaml-dev libxml2-dev \
-            curl xz-utils libplist-utils fakeroot
-
-      # FINALPACKAGE=1 requires a working `plutil`. On Linux that tool doesn't
-      # exist, so we provide a shim that forwards to `plistutil` (libplist-utils).
-      # Without this, the build aborts with:
-      #   "Building final package requires a legacy Xcode install!"
-      - name: Provide plutil shim for FINALPACKAGE builds
-        run: |
-          sudo tee /usr/local/bin/plutil >/dev/null <<'EOF'
-          #!/usr/bin/env bash
-          # Minimal plutil shim for Linux. Supports the operations Theos uses:
-          #   plutil -convert binary1 <file>
-          #   plutil -convert xml1    <file>
-          #   plutil -lint            <file>
-          # Falls back to plistutil from libplist-utils.
-          args=("$@")
-          mode=""
-          file=""
-          i=0
-          while [ $i -lt ${#args[@]} ]; do
-            case "${args[$i]}" in
-              -convert)
-                i=$((i+1)); mode="${args[$i]}" ;;
-              -lint)
-                mode="lint" ;;
-              -*)
-                : ;; # ignore other flags
-              *)
-                file="${args[$i]}" ;;
-            esac
-            i=$((i+1))
-          done
-
-          if [ -z "$file" ] || [ ! -f "$file" ]; then
-            echo "plutil-shim: no valid file argument" >&2
-            exit 1
-          fi
-
-          case "$mode" in
-            binary1)
-              # plistutil reads from -i and writes to -o
-              tmp=$(mktemp)
-              if plistutil -i "$file" -o "$tmp" -f binary; then
-                mv "$tmp" "$file"
-              else
-                rm -f "$tmp"
-                exit 1
-              fi
-              ;;
-            xml1)
-              tmp=$(mktemp)
-              if plistutil -i "$file" -o "$tmp" -f xml; then
-                mv "$tmp" "$file"
-              else
-                rm -f "$tmp"
-                exit 1
-              fi
-              ;;
-            lint)
-              plistutil -i "$file" -o /dev/null >/dev/null 2>&1 || {
-                echo "$file: malformed plist" >&2
-                exit 1
-              }
-              ;;
-            *)
-              # No known operation — just validate
-              plistutil -i "$file" -o /dev/null >/dev/null 2>&1
-              ;;
-          esac
-          EOF
-          sudo chmod +x /usr/local/bin/plutil
-          echo "Installed plutil shim at /usr/local/bin/plutil:"
-          head -5 /usr/local/bin/plutil
+            curl xz-utils fakeroot
 
       - name: Set up Theos Environment
         run: |
@@ -150,20 +70,12 @@ jobs:
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$GITHUB_WORKSPACE/theos/sdks/"
           echo "SYSROOT=$GITHUB_WORKSPACE/theos/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
-      - name: Verify submodules checked out
-        run: |
-          echo "== .gitmodules =="
-          cat .gitmodules || echo "(no .gitmodules)"
-          echo "== submodule status =="
-          git submodule status --recursive
-          echo "== LightMessaging contents =="
-          ls -la LightMessaging 2>/dev/null | head -20 || echo "(LightMessaging missing)"
-
       - name: Compile Rootless Package
         run: |
-          # FINALPACKAGE=1 gives a clean version number (no git-sha suffix).
-          # The plutil shim installed above makes this work on Linux.
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          # Use DEBUG=0 instead of FINALPACKAGE=1:
+          # - DEBUG=0 removes build number suffix from version (clean version)
+          # - FINALPACKAGE=1 triggers macOS-only packaging logic, cannot run on Linux
+          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
