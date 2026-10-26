@@ -49,12 +49,17 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          # Key: install libtinfo5 to satisfy the shared library dependency of the Bingner toolchain clang
+          # Install all dependencies except libtinfo5
           sudo apt-get install -y \
             build-essential pkg-config git coreutils lzma \
             liblzma-dev libssl-dev libyaml-dev libxml2-dev \
-            curl xz-utils fakeroot libtinfo5
-
+            curl xz-utils fakeroot
+          
+          # Manually download and install the libtinfo5 deb package for Ubuntu 22.04
+          wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          rm -f libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          
       - name: Set up Theos Environment
         run: |
           git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
