@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
+        with:
+          submodules: recursive   # pulls any git submodules your fork depends on
 
       - name: Install System Dependencies
         run: |
@@ -37,22 +39,28 @@ jobs:
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$GITHUB_WORKSPACE/theos/sdks/"
           echo "SYSROOT=$GITHUB_WORKSPACE/theos/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
-      - name: Clone RocketBootstrap Source
-        run: |
-          git clone --recursive https://github.com/rpetrich/RocketBootstrap.git rocketbootstrap-src
-
       - name: Compile Rootless Package
         run: |
-          cd rocketbootstrap-src
-          # THEOS_PACKAGE_SCHEME=rootless instructs the linker to use @rpath and prefixes paths to /var/jb
+          # Build directly from the checked-out fork — no extra clone needed
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
 
+      - name: Verify rootless paths in .deb
+        run: |
+          DEB=$(ls packages/*.deb | head -1)
+          echo "Inspecting $DEB"
+          dpkg-deb -c "$DEB" | head -30
+          if ! dpkg-deb -c "$DEB" | grep -q '/var/jb/'; then
+            echo "❌ Package does not contain /var/jb/ paths — not truly rootless!"
+            exit 1
+          fi
+          echo "✅ Rootless paths confirmed"
+
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
         with:
           name: rocketbootstrap-rootless-deb
-          path: rocketbootstrap-src/packages/*.deb
+          path: packages/*.deb
           if-no-files-found: error
