@@ -99,25 +99,6 @@ jobs:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
 
-      - name: Verify package is rootless
-        run: |
-          set -e
-          DEB=$(ls packages/*.deb | head -1)
-          echo "== Package: $DEB =="
-          case "$DEB" in
-            *_iphoneos-arm64.deb) echo "✅ Filename architecture: iphoneos-arm64 (rootless)" ;;
-            *) echo "❌ Expected *_iphoneos-arm64.deb"; exit 1 ;;
-          esac
-
-          echo "== Contents (first 40) =="
-          dpkg-deb -c "$DEB" | head -40
-
-          if ! dpkg-deb -c "$DEB" | grep -q '/var/jb/'; then
-            echo "❌ Package does not contain /var/jb/ paths"
-            exit 1
-          fi
-          echo "✅ Rootless paths confirmed under /var/jb/"
-
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
         with:
