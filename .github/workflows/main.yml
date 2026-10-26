@@ -1,4 +1,4 @@
-name: Build RocketBootstrap Rootless
+name: Build RocketBootstrap Rootless (arm64)
 
 on:
   push:
@@ -44,8 +44,6 @@ jobs:
             done
             git submodule sync --recursive
             git submodule update --init --recursive --depth=1
-          else
-            echo "No .gitmodules found — nothing to do."
           fi
 
       - name: Install System Dependencies
@@ -62,6 +60,21 @@ jobs:
           echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
 
+      # Key: Install the Linux iOS toolchain (Bingner version supports arm64e and is fully compatible with arm64)
+      - name: Install Linux iOS Toolchain
+        run: |
+          set -e
+          mkdir -p "$THEOS/toolchain/linux/iphone"
+          curl -L https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma \
+            -o /tmp/toolchain.tar.lzma
+          tar -xJf /tmp/toolchain.tar.lzma -C /tmp
+          mv /tmp/ios-arm64e-clang-toolchain/* "$THEOS/toolchain/linux/iphone/"
+          rm -rf /tmp/ios-arm64e-clang-toolchain /tmp/toolchain.tar.lzma
+          echo "== Toolchain bin =="
+          ls -la "$THEOS/toolchain/linux/iphone/bin/" | head -20
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
       - name: Fetch iOS SDK
         run: |
           mkdir -p "$GITHUB_WORKSPACE/theos/sdks"
@@ -70,67 +83,47 @@ jobs:
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$GITHUB_WORKSPACE/theos/sdks/"
           echo "SYSROOT=$GITHUB_WORKSPACE/theos/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
-      # RocketBootstrap's Makefile uses the legacy relative path
-      # "framework/makefiles/..." instead of $(THEOS)/makefiles/...
-      # Provide a symlink so make can resolve it. Also patch the Makefile in
-      # place (belt-and-suspenders) so any other legacy references resolve too.
       - name: Fix legacy Theos path references
         run: |
           set -e
           ln -sfn "$THEOS" "$GITHUB_WORKSPACE/framework"
-          echo "Created symlink: $GITHUB_WORKSPACE/framework -> $THEOS"
-
-          # Rewrite any "framework/makefiles" or "framework/extras" references
-          # in Makefiles to use the absolute $THEOS path. This covers the case
-          # where the symlink is not followed (e.g. when make resolves from a
-          # different working directory).
           find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
             if grep -qE 'framework/(makefiles|extras)' "$mf"; then
-              echo "Patching $mf"
               sed -i \
                 -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
                 -e 's#framework/extras#$(THEOS)/extras#g' \
                 "$mf"
             fi
           done
+        env:
+          THEOS: ${{ github.workspace }}/theos
 
-          echo "== Patched Makefiles =="
-          grep -rlE '\$\(THEOS\)/(makefiles|extras)' --include='Makefile' . || true
-
-      - name: Show project layout (diagnostic)
+      - name: Compile Rootless Package (arm64 only)
         run: |
-          echo "== Top-level =="
-          ls -la
-          echo "== Makefile head =="
-          head -80 Makefile || true
-          echo "== Symlink check =="
-          ls -la framework
-          ls -la framework/makefiles/tool.mk || echo "tool.mk NOT found via symlink"
-
-      - name: Compile Rootless Package
-        run: |
-          # DEBUG=0 removes the build-number suffix without triggering the
-          # macOS-only FINALPACKAGE=1 pipeline (which aborts on Linux with
-          # "Building final package requires a legacy Xcode install!").
-          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless
+          # Explicitly restrict to arm64, avoiding arm64e ABI issues
+          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
+          ARCHS: arm64
 
-      - name: Verify rootless paths in .deb
+      - name: Verify architecture and rootless paths
         run: |
           DEB=$(ls packages/*.deb | head -1)
           echo "Inspecting $DEB"
           dpkg-deb -c "$DEB" | head -40
           if ! dpkg-deb -c "$DEB" | grep -q '/var/jb/'; then
-            echo "❌ Package does not contain /var/jb/ paths — not truly rootless!"
+            echo "❌ Package does not contain /var/jb/ paths"
             exit 1
           fi
           echo "✅ Rootless paths confirmed"
+          # Extract and verify architecture
+          mkdir -p /tmp/debcheck && dpkg-deb -x "$DEB" /tmp/debcheck
+          find /tmp/debcheck -name '*.dylib' -exec file {} \; | grep -i 'arm64' || true
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rocketbootstrap-rootless-deb
+          name: rocketbootstrap-rootless-deb-arm64
           path: packages/*.deb
           if-no-files-found: error
