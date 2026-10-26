@@ -17,39 +17,19 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git://github.com/"
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
 
-      - name: Checkout project (no submodules)
+      # Clone the rootless-ready fork instead of the original rpetrich repo.
+      - name: Checkout RocketBootstrap (Lessica fork)
         uses: actions/checkout@v4
         with:
-          submodules: false
+          repository: Lessica/RocketBootstrap
+          ref: ios15
+          submodules: recursive
           fetch-depth: 1
 
-      - name: Fix and initialize submodules over HTTPS
+      - name: Install ldid
         run: |
-          set -e
-          if [ -f .gitmodules ]; then
-            git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key _; do
-              cur=$(git config -f .gitmodules --get "$key")
-              case "$cur" in
-                git://github.com/*)
-                  fixed="https://github.com/${cur#git://github.com/}"
-                  git config -f .gitmodules "$key" "$fixed"
-                  ;;
-                git@github.com:*)
-                  fixed="https://github.com/${cur#git@github.com:}"
-                  git config -f .gitmodules "$key" "$fixed"
-                  ;;
-              esac
-            done
-            git submodule sync --recursive
-            git submodule update --init --recursive --depth=1
-          fi
-
-      # ldid: needed for code signing. dpkg: needed for verifying the .deb.
-      - name: Install Build Tools
-        run: |
-          brew install ldid dpkg
+          brew install ldid
           ldid -v || true
-          dpkg-deb --version | head -1
 
       - name: Install Theos
         run: |
@@ -88,6 +68,15 @@ jobs:
               sed -i '' -e 's#\.\./rocketbootstrap/rocketbootstrap\.h#../RocketBootstrap/rocketbootstrap.h#g' "$f"
             fi
           done
+
+      # Add the missing Provides field so tweaks depending on 'rocketbootstrap' are satisfied.
+      - name: Add Provides field to control file
+        run: |
+          set -e
+          if ! grep -q '^Provides:' control; then
+            echo "Provides: rocketbootstrap" >> control
+            echo "Added Provides: rocketbootstrap to control file"
+          fi
 
       - name: Compile Rootless Package
         run: |
