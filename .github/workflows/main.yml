@@ -12,39 +12,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Rewrite git:// -> https:// globally as a safety net (covers any git
-      # invocation that bypasses our manual submodule handling below).
+      # Rewrite git:// -> https:// globally as a safety net
       - name: Configure Git URL rewrites
         run: |
           git config --global url."https://github.com/".insteadOf "git://github.com/"
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
 
-      # Check out WITHOUT submodules. actions/checkout runs its own
-      # `git submodule sync` internally, which overwrites any rewrite we set
-      # and restores the git:// URL from .gitmodules — that's why the previous
-      # attempt still timed out. Skipping submodules here sidesteps the issue.
+      # Checkout WITHOUT submodules — actions/checkout's internal `git submodule sync`
+      # overwrites any URL rewrite and restores git:// from .gitmodules.
       - name: Checkout project (no submodules)
         uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 1
 
-      # Physically rewrite .gitmodules to HTTPS, sync, and pull submodules.
-      # git config -f edits .gitmodules on disk (not a transient rewrite),
-      # so `git submodule sync` propagates the HTTPS URL correctly.
+      # Physically rewrite .gitmodules to HTTPS, sync, then pull submodules.
       - name: Fix and initialize submodules over HTTPS
         run: |
           set -e
           if [ -f .gitmodules ]; then
             echo "== Before =="
             cat .gitmodules
-            git config -f .gitmodules submodule.LightMessaging.url https://github.com/rpetrich/LightMessaging.git
-            # Also catch any other submodule that might use git:// (future-proof)
             git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key _; do
               cur=$(git config -f .gitmodules --get "$key")
               case "$cur" in
                 git://github.com/*)
                   fixed="https://github.com/${cur#git://github.com/}"
+                  git config -f .gitmodules "$key" "$fixed"
+                  echo "Rewrote $key: $cur -> $fixed"
+                  ;;
+                git@github.com:*)
+                  fixed="https://github.com/${cur#git@github.com:}"
                   git config -f .gitmodules "$key" "$fixed"
                   echo "Rewrote $key: $cur -> $fixed"
                   ;;
@@ -64,7 +62,79 @@ jobs:
           sudo apt-get install -y \
             build-essential pkg-config git coreutils lzma \
             liblzma-dev libssl-dev libyaml-dev libxml2-dev \
-            curl xz-utils
+            curl xz-utils libplist-utils fakeroot
+
+      # FINALPACKAGE=1 requires a working `plutil`. On Linux that tool doesn't
+      # exist, so we provide a shim that forwards to `plistutil` (libplist-utils).
+      # Without this, the build aborts with:
+      #   "Building final package requires a legacy Xcode install!"
+      - name: Provide plutil shim for FINALPACKAGE builds
+        run: |
+          sudo tee /usr/local/bin/plutil >/dev/null <<'EOF'
+          #!/usr/bin/env bash
+          # Minimal plutil shim for Linux. Supports the operations Theos uses:
+          #   plutil -convert binary1 <file>
+          #   plutil -convert xml1    <file>
+          #   plutil -lint            <file>
+          # Falls back to plistutil from libplist-utils.
+          args=("$@")
+          mode=""
+          file=""
+          i=0
+          while [ $i -lt ${#args[@]} ]; do
+            case "${args[$i]}" in
+              -convert)
+                i=$((i+1)); mode="${args[$i]}" ;;
+              -lint)
+                mode="lint" ;;
+              -*)
+                : ;; # ignore other flags
+              *)
+                file="${args[$i]}" ;;
+            esac
+            i=$((i+1))
+          done
+
+          if [ -z "$file" ] || [ ! -f "$file" ]; then
+            echo "plutil-shim: no valid file argument" >&2
+            exit 1
+          fi
+
+          case "$mode" in
+            binary1)
+              # plistutil reads from -i and writes to -o
+              tmp=$(mktemp)
+              if plistutil -i "$file" -o "$tmp" -f binary; then
+                mv "$tmp" "$file"
+              else
+                rm -f "$tmp"
+                exit 1
+              fi
+              ;;
+            xml1)
+              tmp=$(mktemp)
+              if plistutil -i "$file" -o "$tmp" -f xml; then
+                mv "$tmp" "$file"
+              else
+                rm -f "$tmp"
+                exit 1
+              fi
+              ;;
+            lint)
+              plistutil -i "$file" -o /dev/null >/dev/null 2>&1 || {
+                echo "$file: malformed plist" >&2
+                exit 1
+              }
+              ;;
+            *)
+              # No known operation — just validate
+              plistutil -i "$file" -o /dev/null >/dev/null 2>&1
+              ;;
+          esac
+          EOF
+          sudo chmod +x /usr/local/bin/plutil
+          echo "Installed plutil shim at /usr/local/bin/plutil:"
+          head -5 /usr/local/bin/plutil
 
       - name: Set up Theos Environment
         run: |
@@ -91,6 +161,8 @@ jobs:
 
       - name: Compile Rootless Package
         run: |
+          # FINALPACKAGE=1 gives a clean version number (no git-sha suffix).
+          # The plutil shim installed above makes this work on Linux.
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
         env:
           THEOS: ${{ github.workspace }}/theos
