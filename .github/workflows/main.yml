@@ -75,12 +75,11 @@ jobs:
 
       - name: Compile Rootless Package
         run: |
-          # On macOS, FINALPACKAGE=1 works normally — plutil is available.
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
+          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
-
+          
       - name: Verify architecture and rootless paths
         run: |
           DEB=$(ls packages/*.deb | head -1)
