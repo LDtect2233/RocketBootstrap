@@ -70,11 +70,48 @@ jobs:
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$GITHUB_WORKSPACE/theos/sdks/"
           echo "SYSROOT=$GITHUB_WORKSPACE/theos/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
+      # RocketBootstrap's Makefile uses the legacy relative path
+      # "framework/makefiles/..." instead of $(THEOS)/makefiles/...
+      # Provide a symlink so make can resolve it. Also patch the Makefile in
+      # place (belt-and-suspenders) so any other legacy references resolve too.
+      - name: Fix legacy Theos path references
+        run: |
+          set -e
+          ln -sfn "$THEOS" "$GITHUB_WORKSPACE/framework"
+          echo "Created symlink: $GITHUB_WORKSPACE/framework -> $THEOS"
+
+          # Rewrite any "framework/makefiles" or "framework/extras" references
+          # in Makefiles to use the absolute $THEOS path. This covers the case
+          # where the symlink is not followed (e.g. when make resolves from a
+          # different working directory).
+          find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
+            if grep -qE 'framework/(makefiles|extras)' "$mf"; then
+              echo "Patching $mf"
+              sed -i \
+                -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
+                -e 's#framework/extras#$(THEOS)/extras#g' \
+                "$mf"
+            fi
+          done
+
+          echo "== Patched Makefiles =="
+          grep -rlE '\$\(THEOS\)/(makefiles|extras)' --include='Makefile' . || true
+
+      - name: Show project layout (diagnostic)
+        run: |
+          echo "== Top-level =="
+          ls -la
+          echo "== Makefile head =="
+          head -80 Makefile || true
+          echo "== Symlink check =="
+          ls -la framework
+          ls -la framework/makefiles/tool.mk || echo "tool.mk NOT found via symlink"
+
       - name: Compile Rootless Package
         run: |
-          # Use DEBUG=0 instead of FINALPACKAGE=1:
-          # - DEBUG=0 removes build number suffix from version (clean version)
-          # - FINALPACKAGE=1 triggers macOS-only packaging logic, cannot run on Linux
+          # DEBUG=0 removes the build-number suffix without triggering the
+          # macOS-only FINALPACKAGE=1 pipeline (which aborts on Linux with
+          # "Building final package requires a legacy Xcode install!").
           make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless
         env:
           THEOS: ${{ github.workspace }}/theos
