@@ -44,10 +44,12 @@ jobs:
             git submodule update --init --recursive --depth=1
           fi
 
-      - name: Install ldid
+      # ldid: needed for code signing. dpkg: needed for verifying the .deb.
+      - name: Install Build Tools
         run: |
-          brew install ldid
+          brew install ldid dpkg
           ldid -v || true
+          dpkg-deb --version | head -1
 
       - name: Install Theos
         run: |
@@ -87,37 +89,34 @@ jobs:
             fi
           done
 
-      - name: Force ARCHS=arm64 in all Makefiles
-        run: |
-          set -e
-          find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
-            if grep -qE '^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+]?=' "$mf"; then
-              echo "Patching ARCHS in $mf"
-              sed -i '' -E 's/^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+]?=.*/override ARCHS := arm64/' "$mf"
-            fi
-          done
-
-      - name: Compile Rootless Package (arm64 only)
+      - name: Compile Rootless Package
         run: |
           make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless \
-            ARCHS=arm64 \
             TARGET_CODESIGN=ldid \
             ADDITIONAL_CFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path" \
             ADDITIONAL_OBJCFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path"
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
-          ARCHS: arm64
 
-      - name: Verify architecture and rootless paths
+      - name: Verify package is rootless
         run: |
+          set -e
           DEB=$(ls packages/*.deb | head -1)
+          echo "== Package: $DEB =="
+          case "$DEB" in
+            *_iphoneos-arm64.deb) echo "✅ Filename architecture: iphoneos-arm64 (rootless)" ;;
+            *) echo "❌ Expected *_iphoneos-arm64.deb"; exit 1 ;;
+          esac
+
+          echo "== Contents (first 40) =="
           dpkg-deb -c "$DEB" | head -40
+
           if ! dpkg-deb -c "$DEB" | grep -q '/var/jb/'; then
             echo "❌ Package does not contain /var/jb/ paths"
             exit 1
           fi
-          echo "✅ Rootless paths confirmed"
+          echo "✅ Rootless paths confirmed under /var/jb/"
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
