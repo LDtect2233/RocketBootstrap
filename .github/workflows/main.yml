@@ -12,10 +12,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Rewrite git:// -> https:// BEFORE checkout so submodules don't hang.
+      # GitHub no longer serves git:// on port 9418; the LightMessaging submodule
+      # in RocketBootstrap still points at git://github.com/..., which times out.
+      - name: Configure Git to rewrite git:// to https://
+        run: |
+          git config --global url."https://github.com/".insteadOf "git://github.com/"
+          git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+
       - name: Checkout project
         uses: actions/checkout@v4
         with:
-          submodules: recursive   # pulls any git submodules your fork depends on
+          submodules: recursive
+          fetch-depth: 1
 
       - name: Install System Dependencies
         run: |
@@ -39,6 +48,15 @@ jobs:
           cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$GITHUB_WORKSPACE/theos/sdks/"
           echo "SYSROOT=$GITHUB_WORKSPACE/theos/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
 
+      - name: Verify submodules checked out
+        run: |
+          echo "== .gitmodules =="
+          cat .gitmodules || echo "(no .gitmodules)"
+          echo "== submodule status =="
+          git submodule status --recursive
+          echo "== LightMessaging contents =="
+          ls -la LightMessaging | head -20
+
       - name: Compile Rootless Package
         run: |
           # Build directly from the checked-out fork — no extra clone needed
@@ -51,7 +69,7 @@ jobs:
         run: |
           DEB=$(ls packages/*.deb | head -1)
           echo "Inspecting $DEB"
-          dpkg-deb -c "$DEB" | head -30
+          dpkg-deb -c "$DEB" | head -40
           if ! dpkg-deb -c "$DEB" | grep -q '/var/jb/'; then
             echo "❌ Package does not contain /var/jb/ paths — not truly rootless!"
             exit 1
