@@ -1,10 +1,11 @@
+
 name: Build RocketBootstrap Rootless
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   workflow_dispatch:
 
 jobs:
@@ -14,8 +15,11 @@ jobs:
     steps:
       - name: Configure Git URL rewrites
         run: |
-          git config --global url."https://github.com/".insteadOf "git://github.com/"
-          git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+          git config --global \
+            url."https://github.com/".insteadOf "git://github.com/"
+
+          git config --global --add \
+            url."https://github.com/".insteadOf "git@github.com:"
 
       - name: Checkout RocketBootstrap (Lessica fork)
         uses: actions/checkout@v4
@@ -28,45 +32,112 @@ jobs:
       - name: Install ldid
         run: |
           brew install ldid
-          ldid -v || true
+          ldid -v
 
       - name: Install Theos
+        shell: bash
         run: |
-          git clone --recursive https://github.com/theos/theos.git "$GITHUB_WORKSPACE/theos"
+          set -euo pipefail
+
+          git clone --recursive \
+            https://github.com/theos/theos.git \
+            "$GITHUB_WORKSPACE/theos"
+
           echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
 
       - name: Fetch iOS SDK
+        shell: bash
         run: |
-          mkdir -p "$THEOS/sdks"
-          curl -L https://github.com/theos/sdks/archive/refs/heads/master.tar.gz | tar -xz -C /tmp
-          cp -r /tmp/sdks-master/iPhoneOS14.5.sdk "$THEOS/sdks/"
-          echo "SYSROOT=$THEOS/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
+          set -euo pipefail
 
-      - name: Provide Rootless Stubs
+          mkdir -p "$THEOS/sdks"
+
+          curl --fail --location --retry 3 \
+            https://github.com/theos/sdks/archive/refs/heads/master.tar.gz \
+            | tar -xz -C /tmp
+
+          test -d /tmp/sdks-master/iPhoneOS14.5.sdk
+
+          cp -R /tmp/sdks-master/iPhoneOS14.5.sdk \
+            "$THEOS/sdks/"
+
+          echo "SYSROOT=$THEOS/sdks/iPhoneOS14.5.sdk" \
+            >> "$GITHUB_ENV"
+
+          echo "SDKVERSION=14.5" >> "$GITHUB_ENV"
+
+      - name: Configure Rootless TweakInject Library
+        shell: bash
         run: |
-          set -e
-          # Theos ships with a rootless stub for CydiaSubstrate. We reuse it
-          # for both the missing TweakInject and libsubstrate links.
-          SOURCE_STUB="$THEOS/vendor/lib/iphone/rootless/CydiaSubstrate.framework/CydiaSubstrate.tbd"
-          
-          mkdir -p libs/rootless
-          if [ -f "$SOURCE_STUB" ]; then
-            cp "$SOURCE_STUB" libs/rootless/TweakInject.tbd
-            cp "$SOURCE_STUB" "$THEOS/lib/libsubstrate.tbd"
-            echo "✅ Copied CydiaSubstrate.tbd to libs/rootless/TweakInject.tbd and $THEOS/lib/libsubstrate.tbd"
-          else
-            echo "❌ Stub not found at $SOURCE_STUB"
-            exit 1
+          set -euo pipefail
+
+          # The repository already contains the correct rootless stub.
+          test -f libs/rootless/TweakInject.tbd
+
+          # Theos searches this directory for rootless libraries.
+          mkdir -p "$THEOS/lib/iphone/rootless"
+
+          # Use the conventional libNAME.tbd filename.
+          cp libs/rootless/TweakInject.tbd \
+            "$THEOS/lib/iphone/rootless/libTweakInject.tbd"
+
+          # Verify that the stub describes the expected library.
+          grep -q "@rpath/TweakInject.dylib" \
+            "$THEOS/lib/iphone/rootless/libTweakInject.tbd"
+
+          echo "Rootless TweakInject stub configured."
+
+      - name: Fix Rootless Makefile Linker Configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Rootless packages require iOS 15 or newer.
+          if grep -qF \
+            'TARGET := iphone:clang:latest:13.0' Makefile; then
+            sed -i '' \
+              's#^TARGET := iphone:clang:latest:13\.0$#TARGET := iphone:clang:latest:15.0#' \
+              Makefile
           fi
 
-      - name: Fix legacy Theos path references
+          # WEAK_LIBRARIES expects a library name, not a relative
+          # path to a .tbd file.
+          if grep -qF \
+            'librocketbootstrap_WEAK_LIBRARIES += libs/rootless/TweakInject.tbd' \
+            Makefile; then
+
+            sed -i '' \
+              's#^librocketbootstrap_WEAK_LIBRARIES += libs/rootless/TweakInject.tbd$#librocketbootstrap_WEAK_LIBRARIES += TweakInject#' \
+              Makefile
+          fi
+
+          # Fail early if the expected source Makefile was not patched.
+          grep -qF \
+            'librocketbootstrap_WEAK_LIBRARIES += TweakInject' \
+            Makefile
+
+          grep -qF \
+            'TARGET := iphone:clang:latest:15.0' \
+            Makefile
+
+          echo "Patched rootless target and weak-library configuration."
+          grep -nE '^(TARGET|librocketbootstrap_WEAK_LIBRARIES)' \
+            Makefile
+
+      - name: Fix Legacy Theos Path References
+        shell: bash
         run: |
-          set -e
-          ln -sfn "$THEOS" "$GITHUB_WORKSPACE/framework"
-          find . -name 'Makefile' -type f -not -path './.git/*' | while read -r mf; do
+          set -euo pipefail
+
+          find . \
+            -path './.git' -prune -o \
+            -path './theos' -prune -o \
+            -type f -name 'Makefile' -print |
+          while IFS= read -r mf; do
             if grep -qE 'framework/(makefiles|extras)' "$mf"; then
               echo "Patching $mf"
+
               sed -i '' \
                 -e 's#framework/makefiles#$(THEOS)/makefiles#g' \
                 -e 's#framework/extras#$(THEOS)/extras#g' \
@@ -74,34 +145,72 @@ jobs:
             fi
           done
 
-      - name: Fix header include case
+      - name: Fix Header Include Case
+        shell: bash
         run: |
-          set -e
-          find . -type f \( -name '*.h' -o -name '*.m' -o -name '*.mm' -o -name '*.x' -o -name '*.xm' \) \
-            -not -path './.git/*' | while read -r f; do
-            if grep -q 'rocketbootstrap/rocketbootstrap\.h' "$f" 2>/dev/null; then
-              echo "Patching $f"
-              sed -i '' -e 's#\.\./rocketbootstrap/rocketbootstrap\.h#../RocketBootstrap/rocketbootstrap.h#g' "$f"
+          set -euo pipefail
+
+          find . \
+            -path './.git' -prune -o \
+            -path './theos' -prune -o \
+            -type f \
+            \( -name '*.h' -o -name '*.m' -o -name '*.mm' \
+               -o -name '*.x' -o -name '*.xm' \) \
+            -print |
+          while IFS= read -r f; do
+            if grep -q 'rocketbootstrap/rocketbootstrap\.h' \
+              "$f" 2>/dev/null; then
+
+              echo "Patching header reference in $f"
+
+              sed -i '' \
+                's#\.\./rocketbootstrap/rocketbootstrap\.h#../RocketBootstrap/rocketbootstrap.h#g' \
+                "$f"
             fi
           done
 
-      - name: Add Provides field to control file
+      - name: Add Provides Field
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           if ! grep -q '^Provides:' control; then
-            echo "Provides: rocketbootstrap" >> control
-            echo "Added Provides: rocketbootstrap to control file"
+            echo 'Provides: rocketbootstrap' >> control
           fi
 
-      - name: Compile Rootless Package
+      - name: Clean Previous Build
+        shell: bash
         run: |
-          make package DEBUG=0 THEOS_PACKAGE_SCHEME=rootless \
-            TARGET_CODESIGN=ldid \
-            ADDITIONAL_CFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path" \
-            ADDITIONAL_OBJCFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path"
+          set -euo pipefail
+
+          make clean \
+            THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Compile Rootless Package
+        shell: bash
         env:
           THEOS: ${{ github.workspace }}/theos
           SYSROOT: ${{ github.workspace }}/theos/sdks/iPhoneOS14.5.sdk
+          SDKVERSION: "14.5"
+        run: |
+          set -euo pipefail
+
+          make package \
+            DEBUG=0 \
+            THEOS_PACKAGE_SCHEME=rootless \
+            TARGET_CODESIGN=ldid \
+            ADDITIONAL_CFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path" \
+            ADDITIONAL_OBJCFLAGS="-Wno-error=nonportable-include-path -Wno-nonportable-include-path"
+
+      - name: Verify Package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Built Debian packages:"
+          find packages -maxdepth 1 -type f -name '*.deb' -print
+
+          test -n "$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
 
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
