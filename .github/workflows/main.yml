@@ -29,10 +29,15 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      
       - name: Install ldid
+        shell: bash
         run: |
+          set -euo pipefail
           brew install ldid
-          ldid -v
+          command -v ldid
+          ldid -h || true
+
 
       - name: Install Theos
         shell: bash
